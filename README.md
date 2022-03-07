@@ -7,6 +7,75 @@ An implementation of Go's filesystem interface for the IPFS UnixFS format.
 
 `mfsng` is an implementation of [fs.FS](https://pkg.go.dev/io/fs#FS) over a [UnixFS](https://github.com/ipfs/specs/blob/master/UNIXFS.md) merkledag.
 
+
+## Example Usage
+
+In this example `printFile` prints the file `folder/hello.txt` held in the UnixFS represented by the supplied [ipld.Node](https://pkg.go.dev/github.com/ipld/go-ipld-prime#Node).
+`getter` is something that implements [ipld.NodeGetter](https://pkg.go.dev/github.com/ipfs/go-ipld-format#NodeGetter), such as a [DagService](https://pkg.go.dev/github.com/ipfs/go-merkledag#NewDAGService)
+
+```Go
+func printFile(node ipld.Node, getter ipld.NodeGetter) {
+	fsys, err := mfsng.ReadFS(node, getter)
+	if err != nil {
+		log.Fatalf("failed to create fs: %v", err)
+	}
+
+	f, err := fsys.Open("folder/hello.txt")
+	if err != nil {
+		log.Fatalf("failed to open file: %v", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		log.Fatalf("failed to read file: %v", err)
+	}
+
+	fmt.Println(string(data))
+}
+```
+
+This example demonstrates how the FS can be used with Go's standard walk function and shows how the underlying CID can
+be obtained for a file.
+
+```Go
+func walkFiles(node ipld.Node, getter ipld.NodeGetter) {
+	fsys, err := mfsng.ReadFS(node, getter)
+	if err != nil {
+		log.Fatalf("failed to create fs: %v", err)
+	}
+	if err := fs.WalkDir(fsys, ".", func(path string, de fs.DirEntry, rerr error) error {
+		if de.IsDir() {
+			fmt.Printf("D %s\n", path)
+		} else {
+			f := de.(*mfsng.File)
+			fmt.Printf("F %s (cid=%s)\n", path, f.Cid())
+		}
+		return nil
+	}); err != nil {
+		return log.Fatalf("failed walk: %v", err)
+	}
+}
+```
+
+An example of using the FS with Go's Glob functionality:
+```Go
+func matchFiles(node ipld.Node, getter ipld.NodeGetter) {
+	fsys, err := mfsng.ReadFS(node, getter)
+	if err != nil {
+		log.Fatalf("failed to create fs: %v", err)
+	}
+	matches, err := fs.Glob(fsys, "some/*/folder/*.txt")
+	if err != nil {
+		log.Fatalf("failed to glob: %v", err)
+	}
+
+	for _, match := range matches {
+		fmt.Println(match)
+	}
+}
+```
+
 ## Status
 
 This package is experimental. It has a number of limitations:
