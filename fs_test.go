@@ -115,6 +115,48 @@ func TestOpenNotFound(t *testing.T) {
 	}
 }
 
+func TestFSReadDir(t *testing.T) {
+	ds := mdtest.Mock()
+	fsys := buildFS(t, ds, map[string][]byte{
+		"hello.txt":           []byte("hello1"),
+		"test/hello2.txt":     []byte("hello2"),
+		"test/sub/hello4.txt": []byte("hello4"),
+		"test/sub/hello5.txt": []byte("hello5"),
+		"test/goodbye.txt":    []byte("goodbye"),
+	})
+
+	entries, err := fsys.ReadDir("test")
+	if err != nil {
+		t.Fatalf("failed to glob: %v", err)
+	}
+
+	got := make([]fs.FileInfo, len(entries))
+	for i := range entries {
+		var err error
+		got[i], err = entries[i].Info()
+		if err != nil {
+			t.Fatalf("failed to get entry info: %v", err)
+		}
+	}
+
+	want := []fs.FileInfo{
+		&FileInfo{name: "goodbye.txt", size: 7},
+		&FileInfo{name: "hello2.txt", size: 6},
+		&FileInfo{name: "sub", size: 228, filemode: fs.ModeDir},
+	}
+
+	fileInfoComparer := cmp.Comparer(func(a, b *FileInfo) bool {
+		return a.name == b.name &&
+			a.filemode == b.filemode &&
+			a.size == b.size &&
+			a.modtime.Equal(b.modtime)
+	})
+
+	if diff := cmp.Diff(want, got, ignoreSliceOrder, fileInfoComparer); diff != "" {
+		t.Errorf("Glob() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestOpenChecksForValidName(t *testing.T) {
 	testCases := []struct {
 		name  string
@@ -224,6 +266,8 @@ func buildUnixFS(t *testing.T, ds ipld.DAGService, files map[string][]byte) uio.
 }
 
 func addFileToDir(t *testing.T, parent uio.Directory, ds ipld.DAGService, fpath string, content []byte) (uio.Directory, error) {
+	t.Helper()
+
 	if !strings.Contains(fpath, "/") {
 		var nd ipld.Node
 		if content == nil {

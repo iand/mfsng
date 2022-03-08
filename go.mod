@@ -7,7 +7,6 @@ require (
 	github.com/ipfs/go-cid v0.1.0
 	github.com/ipfs/go-ipld-format v0.2.0
 	github.com/ipfs/go-merkledag v0.5.1
-	github.com/ipfs/go-mfs v0.2.1
 	github.com/ipfs/go-path v0.2.1
 	github.com/ipfs/go-unixfs v0.3.1
 )
@@ -64,3 +63,6 @@ require (
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 )
+
+// See https://github.com/ipfs/go-unixfs/pull/117
+replace github.com/ipfs/go-unixfs => github.com/iand/go-unixfs v0.3.2-0.20220113124813-f455d36c5fd1

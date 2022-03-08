@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/ipfs/go-cid"
 	ipld "github.com/ipfs/go-ipld-format"
 	"github.com/ipfs/go-merkledag"
-	"github.com/ipfs/go-mfs"
-	path "github.com/ipfs/go-path"
+	ipath "github.com/ipfs/go-path"
+	"github.com/ipfs/go-unixfs"
+	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var (
@@ -25,40 +24,31 @@ var (
 )
 
 type FS struct {
-	root *mfs.Directory
-	ctx  context.Context // an embedded context for cancellation and deadline propogation, can be overridden by WithContext method
+	udir   uio.Directory
+	getter ipld.NodeGetter
+	ctx    context.Context // an embedded context for cancellation and deadline propogation, can be overridden by WithContext method
 }
 
 // ReadFS returns a read-only filesystem. It expects the supplied node to be the root of a UnixFS merkledag.
 func ReadFS(node ipld.Node, getter ipld.NodeGetter) (*FS, error) {
-	pbnode, ok := node.(*merkledag.ProtoNode)
-	if !ok {
-		return nil, fmt.Errorf("invalid node type")
-	}
-
-	root, err := mfs.NewRoot(context.Background(), roDagServ{getter}, pbnode, nil)
+	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(getter), node)
 	if err != nil {
-		return nil, fmt.Errorf("new root: %w", err)
+		return nil, fmt.Errorf("new directory from node: %w", err)
 	}
 
 	return &FS{
-		root: root.GetDirectory(),
+		udir:   udir,
+		getter: getter,
+		ctx:    context.Background(),
 	}, nil
-}
-
-// FromDir returns a new FS using the supplied mfs.Dirirectory as a root.
-// Deprecated: don't rely on this function, use ReadFS if possible
-func FromDir(dir *mfs.Directory) *FS {
-	return &FS{
-		root: dir,
-	}
 }
 
 // WithContext returns an FS using the supplied context
 func (fsys *FS) WithContext(ctx context.Context) fs.FS {
 	return &FS{
-		root: fsys.root,
-		ctx:  ctx,
+		udir:   fsys.udir,
+		getter: fsys.getter,
+		ctx:    ctx,
 	}
 }
 
@@ -69,132 +59,137 @@ func (fsys *FS) context() context.Context {
 	return fsys.ctx
 }
 
-func (fsys *FS) Open(name string) (fs.File, error) {
-	if !fs.ValidPath(name) {
+func (fsys *FS) Open(path string) (fs.File, error) {
+	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{
 			Op:   "open",
-			Path: name,
+			Path: path,
 			Err:  fs.ErrInvalid,
 		}
 	}
 
-	if name == "." {
-		name = ""
+	if path == "." {
+		path = ""
 	}
-	fsn, err := fsys.DirLookup(name)
+	node, nodeName, err := fsys.locateNode(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound) {
-			return nil, &fs.PathError{
-				Op:   "open",
-				Path: name,
-				Err:  fs.ErrNotExist,
-			}
-		}
 		return nil, &fs.PathError{
 			Op:   "open",
-			Path: name,
+			Path: path,
 			Err:  err,
 		}
 	}
 
-	baseName := filepath.Base(name)
-
-	switch fsnt := fsn.(type) {
-	case *mfs.Directory:
-		return &Dir{
-			dir:  fsnt,
-			name: baseName,
-			ctx:  fsys.context(),
-		}, nil
-	case *mfs.File:
-		return &File{
-			file: fsnt,
-			name: baseName,
-			ctx:  fsys.context(),
-		}, nil
-	default:
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: name,
-			Err:  fs.ErrInvalid,
+	switch tnode := node.(type) {
+	case *merkledag.ProtoNode:
+		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
+		if err != nil {
+			return nil, &fs.PathError{
+				Op:   "open",
+				Path: path,
+				Err:  err,
+			}
 		}
+
+		switch fsn.Type() {
+		case unixfs.TDirectory, unixfs.THAMTShard:
+			return newDir(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TFile:
+			return newFile(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TRaw:
+			// TODO
+		case unixfs.TSymlink:
+			// TODO
+		}
+	}
+
+	return nil, &fs.PathError{
+		Op:   "open",
+		Path: path,
+		Err:  fs.ErrInvalid,
 	}
 }
 
 // Sub returns an FS corresponding to the subtree rooted at dir.
-func (fsys *FS) Sub(dir string) (fs.FS, error) {
-	fsn, err := fsys.DirLookup(dir)
+func (fsys *FS) Sub(path string) (fs.FS, error) {
+	node, _, err := fsys.locateNode(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound) {
-			return nil, &fs.PathError{
-				Op:   "sub",
-				Path: dir,
-				Err:  fs.ErrNotExist,
-			}
-		}
 		return nil, &fs.PathError{
 			Op:   "sub",
-			Path: dir,
+			Path: path,
 			Err:  err,
 		}
 	}
 
-	switch fsnt := fsn.(type) {
-	case *mfs.Directory:
-		return &FS{
-			root: fsnt,
-			ctx:  fsys.context(),
-		}, nil
-	default:
+	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(fsys.getter), node)
+	if err != nil {
+		if errors.Is(err, uio.ErrNotADir) {
+			return nil, &fs.PathError{
+				Op:   "sub",
+				Path: path,
+				Err:  fs.ErrInvalid,
+			}
+		}
 		return nil, &fs.PathError{
 			Op:   "sub",
-			Path: dir,
-			Err:  fs.ErrInvalid,
+			Path: path,
+			Err:  fmt.Errorf("new directory from node: %w", err),
 		}
 	}
+
+	return &FS{
+		getter: fsys.getter,
+		udir:   udir,
+		ctx:    fsys.context(),
+	}, nil
 }
 
 // ReadDir reads the named directory
 // and returns a list of directory entries sorted by filename.
-func (fsys *FS) ReadDir(name string) ([]fs.DirEntry, error) {
-	if name == "." {
-		name = ""
+func (fsys *FS) ReadDir(path string) ([]fs.DirEntry, error) {
+	if path == "." {
+		path = ""
 	}
 
-	fsn, err := fsys.DirLookup(name)
+	node, _, err := fsys.locateNode(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound) {
-			return nil, &fs.PathError{
-				Op:   "readdir",
-				Path: name,
-				Err:  fs.ErrNotExist,
-			}
-		}
 		return nil, &fs.PathError{
 			Op:   "readdir",
-			Path: name,
+			Path: path,
 			Err:  err,
 		}
 	}
 
-	dir, ok := fsn.(*mfs.Directory)
-	if !ok {
+	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(fsys.getter), node)
+	if err != nil {
+		if errors.Is(err, uio.ErrNotADir) {
+			return nil, &fs.PathError{
+				Op:   "readdir",
+				Path: path,
+				Err:  fs.ErrInvalid,
+			}
+		}
 		return nil, &fs.PathError{
 			Op:   "readdir",
-			Path: name,
-			Err:  fs.ErrInvalid,
+			Path: path,
+			Err:  fmt.Errorf("new directory from node: %w", err),
 		}
 	}
 
-	names, err := dir.ListNames(fsys.ctx)
-	if err != nil {
+	var names []string
+	if err := udir.ForEachLink(fsys.context(), func(l *ipld.Link) error {
+		names = append(names, l.Name)
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("list names: %w", err)
 	}
 	sort.Strings(names)
 
 	entries := []fs.DirEntry{}
 	for _, name := range names {
-		entry, err := dirEntry(fsys.ctx, dir, name)
+		entry, err := dirEntry(fsys.context(), fsys.getter, udir, name)
 		if err != nil {
 			return entries, &fs.PathError{
 				Op:   "readdir",
@@ -209,76 +204,72 @@ func (fsys *FS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
-// DirLookup will look up a file or directory at the given path
-// under the directory 'd'
-func (fsys *FS) DirLookup(pth string) (mfs.FSNode, error) {
-	pth = strings.Trim(pth, "/")
-	parts := path.SplitList(pth)
+func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
+	path = strings.Trim(path, "/")
+	parts := ipath.SplitList(path)
 	if len(parts) == 1 && parts[0] == "" {
-		return fsys.root, nil
+		node, err := fsys.udir.GetNode()
+		if err != nil {
+			return nil, "", fmt.Errorf("get root node: %w", err)
+		}
+		return node, "", nil
 	}
 
-	var cur mfs.FSNode
-	cur = fsys.root
-	for i, p := range parts {
-		chdir, ok := cur.(*mfs.Directory)
-		if !ok {
-			return nil, fmt.Errorf("cannot access %s: Not a directory", path.Join(parts[:i+1]))
+	var cur uio.Directory
+	cur = fsys.udir
+	for i, segment := range parts {
+		childNode, err := cur.Find(fsys.context(), segment)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound) {
+				return nil, "", fs.ErrNotExist
+			}
+			return nil, "", fmt.Errorf("find: %w", err)
 		}
 
-		child, err := chdir.Child(p)
+		if i == len(parts)-1 {
+			// Last segment of path
+			return childNode, segment, nil
+		}
+
+		childDir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(fsys.getter), childNode)
+		if err != nil {
+			if errors.Is(err, uio.ErrNotADir) {
+				return nil, "", fs.ErrInvalid
+			}
+			return nil, "", fmt.Errorf("new directory from node: %w", err)
+		}
+
+		cur = childDir
+	}
+	return nil, "", fs.ErrInvalid
+}
+
+func dirEntry(ctx context.Context, getter ipld.NodeGetter, dir uio.Directory, name string) (fs.DirEntry, error) {
+	node, err := dir.Find(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("find: %w", err)
+	}
+
+	switch tnode := node.(type) {
+	case *merkledag.ProtoNode:
+		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
 		if err != nil {
 			return nil, err
 		}
 
-		cur = child
+		switch fsn.Type() {
+		case unixfs.TDirectory, unixfs.THAMTShard:
+			return newDir(ctx, name, node, getter)
+
+		case unixfs.TFile:
+			return newFile(ctx, name, node, getter)
+
+		case unixfs.TRaw:
+		case unixfs.TSymlink:
+		default:
+			return nil, fs.ErrInvalid
+		}
 	}
-	return cur, nil
-}
 
-func dirEntry(ctx context.Context, dir *mfs.Directory, name string) (fs.DirEntry, error) {
-	fsn, err := dir.Child(name)
-	if err != nil {
-		return nil, fmt.Errorf("child: %w", err)
-	}
-
-	switch fsnt := fsn.(type) {
-	case *mfs.Directory:
-		return &Dir{
-			dir:  fsnt,
-			name: name,
-			ctx:  ctx,
-		}, nil
-	case *mfs.File:
-		return &File{
-			file: fsnt,
-			name: name,
-			ctx:  ctx,
-		}, nil
-	default:
-		return nil, fs.ErrInvalid
-	}
-}
-
-var errReadOnly = errors.New("dag service is read only")
-
-type roDagServ struct {
-	ipld.NodeGetter
-}
-
-func (roDagServ) Add(context.Context, ipld.Node) error {
-	// TODO: Add ought to return errReadOnly but mfs' implementation of GetNode calls Add unconditionally
-	return nil
-}
-
-func (roDagServ) AddMany(context.Context, []ipld.Node) error {
-	return errReadOnly
-}
-
-func (roDagServ) Remove(context.Context, cid.Cid) error {
-	return errReadOnly
-}
-
-func (roDagServ) RemoveMany(context.Context, []cid.Cid) error {
-	return errReadOnly
+	return nil, fs.ErrInvalid
 }

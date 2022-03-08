@@ -81,12 +81,10 @@ func matchFiles(node ipld.Node, getter ipld.NodeGetter) {
 This package is experimental. It has a number of limitations:
 
  - Read only
- - Depends on [go-mfs](https://github.com/ipfs/go-mfs) for much of its functionality.
  - No support for symlinks.
  - No support for modtimes since they are not exposed by go-unixfs (but see [go-unixfs#117](https://github.com/ipfs/go-unixfs/pull/117))
 
-The aim is to remove the dependency on go-mfs entirely so that this package becomes a standalone alternative. 
-Adding write capabilities is also planned but some thought is needed around the API since there is no official one. See [issue-45757](https://github.com/golang/go/issues/45757]).
+Adding write capabilities is planned but some thought is needed around the API since there is no official one. See [issue-45757](https://github.com/golang/go/issues/45757]).
 
 ## Contributing
 

@@ -7,57 +7,65 @@ import (
 	"io/fs"
 	"sync"
 
-	"github.com/ipfs/go-mfs"
+	ipld "github.com/ipfs/go-ipld-format"
+	"github.com/ipfs/go-merkledag"
+	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var _ fs.ReadDirFile = (*Dir)(nil)
 
 type Dir struct {
-	dir  *mfs.Directory
-	name string
-	ctx  context.Context // an embedded context for cancellation and deadline propogation
+	udir   uio.Directory
+	getter ipld.NodeGetter
+	ctx    context.Context // an embedded context for cancellation and deadline propogation
+	info   FileInfo
 
-	names     []string // names is written once by namesOnce and read-only thereafter
 	namesOnce sync.Once
+	names     []string // names is written once by namesOnce and read-only thereafter
 
 	mu     sync.Mutex // guards access to all of following fields
-	info   *FileInfo
-	offset int // number of entries read by prior calls to ReadDir
+	offset int        // number of entries read by prior calls to ReadDir
 }
 
-func (d *Dir) Stat() (fs.FileInfo, error) {
-	d.mu.Lock()
-	info := d.info
-	d.mu.Unlock()
-
-	if info != nil {
-		return info, nil
-	}
-
-	info = &FileInfo{
-		name:     d.name,
-		filemode: fs.ModeDir,
-	}
-
-	var err error
-	info.node, err = d.dir.GetNode()
+func newDir(ctx context.Context, name string, node ipld.Node, getter ipld.NodeGetter) (*Dir, error) {
+	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(getter), node)
 	if err != nil {
-		return nil, fmt.Errorf("get node: %w", err)
+		return nil, fmt.Errorf("directory from node: %w", err)
 	}
-
-	d.mu.Lock()
-	d.info = info
-	d.mu.Unlock()
-	return info, nil
+	return newDirFromUnixFS(ctx, name, node, getter, udir)
 }
 
-func (d *Dir) Name() string               { return d.name }
+func newDirFromUnixFS(ctx context.Context, name string, node ipld.Node, getter ipld.NodeGetter, udir uio.Directory) (*Dir, error) {
+	size, err := node.Size()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Dir{
+		udir:   udir,
+		getter: getter,
+		ctx:    ctx,
+		info: FileInfo{
+			name:     name,
+			size:     int64(size),
+			filemode: fs.ModeDir,
+			node:     node,
+		},
+	}, nil
+}
+
+// Stat returns a FileInfo describing the directory.
+func (d *Dir) Stat() (fs.FileInfo, error) {
+	return &d.info, nil
+}
+
+func (d *Dir) Name() string               { return d.info.name }
 func (d *Dir) IsDir() bool                { return true }
 func (d *Dir) Info() (fs.FileInfo, error) { return d.Stat() }
-func (d *Dir) Type() fs.FileMode          { return fs.FileMode(fs.ModeDir) }
+func (d *Dir) Type() fs.FileMode          { return fs.ModeDir }
 
 func (d *Dir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fs.ErrInvalid}
+	return 0, &fs.PathError{Op: "read", Path: d.info.name, Err: fs.ErrInvalid}
 }
 
 func (d *Dir) Close() error {
@@ -81,7 +89,11 @@ func (d *Dir) ReadDir(limit int) ([]fs.DirEntry, error) {
 	// Read the names once
 	var err error
 	d.namesOnce.Do(func() {
-		names, listErr := d.dir.ListNames(d.ctx)
+		var names []string
+		listErr := d.udir.ForEachLink(d.ctx, func(l *ipld.Link) error {
+			names = append(names, l.Name)
+			return nil
+		})
 		if listErr != nil {
 			err = fmt.Errorf("list names: %w", listErr)
 			return
@@ -109,7 +121,7 @@ func (d *Dir) ReadDir(limit int) ([]fs.DirEntry, error) {
 	for i := range entries {
 		name := d.names[offset+i]
 
-		entry, err := dirEntry(d.ctx, d.dir, name)
+		entry, err := dirEntry(d.ctx, d.getter, d.udir, name)
 		if err != nil {
 			d.mu.Lock()
 			d.offset += i
