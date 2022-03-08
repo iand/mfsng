@@ -84,7 +84,7 @@ This package is experimental. It has a number of limitations:
  - No support for symlinks.
  - No support for modtimes since they are not exposed by go-unixfs (but see [go-unixfs#117](https://github.com/ipfs/go-unixfs/pull/117))
 
-Adding write capabilities is planned but some thought is needed around the API since there is no official one. See [issue-45757](https://github.com/golang/go/issues/45757]).
+Adding write capabilities is planned but some thought is needed around the API since there is no official one. See [issue-45757](https://github.com/golang/go/issues/45757).
 
 ## Contributing
 
