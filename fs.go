@@ -60,56 +60,7 @@ func (fsys *FS) context() context.Context {
 }
 
 func (fsys *FS) Open(path string) (fs.File, error) {
-	if !fs.ValidPath(path) {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  fs.ErrInvalid,
-		}
-	}
-
-	if path == "." {
-		path = ""
-	}
-	node, nodeName, err := fsys.locateNode(path)
-	if err != nil {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  err,
-		}
-	}
-
-	switch tnode := node.(type) {
-	case *merkledag.ProtoNode:
-		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
-		if err != nil {
-			return nil, &fs.PathError{
-				Op:   "open",
-				Path: path,
-				Err:  err,
-			}
-		}
-
-		switch fsn.Type() {
-		case unixfs.TDirectory, unixfs.THAMTShard:
-			return newDir(fsys.context(), nodeName, tnode, fsys.getter)
-
-		case unixfs.TFile:
-			return newFile(fsys.context(), nodeName, tnode, fsys.getter)
-
-		case unixfs.TRaw:
-			// TODO
-		case unixfs.TSymlink:
-			// TODO
-		}
-	}
-
-	return nil, &fs.PathError{
-		Op:   "open",
-		Path: path,
-		Err:  fs.ErrInvalid,
-	}
+	return fsys.OpenFile(path, os.O_RDONLY, 0)
 }
 
 // Sub returns an FS corresponding to the subtree rooted at dir.
@@ -206,8 +157,7 @@ func (fsys *FS) ReadDir(path string) ([]fs.DirEntry, error) {
 
 func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
 	path = strings.Trim(path, "/")
-	parts := ipath.SplitList(path)
-	if len(parts) == 1 && parts[0] == "" {
+	if path == "" {
 		node, err := fsys.udir.GetNode()
 		if err != nil {
 			return nil, "", fmt.Errorf("get root node: %w", err)
@@ -215,33 +165,59 @@ func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
 		return node, "", nil
 	}
 
+	parent, err := fsys.locateParentDir(path)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var name string
+	i := strings.LastIndex(path, "/")
+	if i == -1 {
+		name = path
+	} else {
+		name = path[i+1:]
+	}
+
+	child, err := parent.Find(fsys.context(), name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound{}) {
+			return nil, "", fs.ErrNotExist
+		}
+		return nil, "", fmt.Errorf("find: %w", err)
+	}
+	return child, name, nil
+}
+
+func (fsys *FS) locateParentDir(path string) (uio.Directory, error) {
+	path = strings.Trim(path, "/")
+	if strings.LastIndex(path, "/") == -1 {
+		return fsys.udir, nil
+	}
+	parts := ipath.SplitList(path)
+
 	var cur uio.Directory
 	cur = fsys.udir
-	for i, segment := range parts {
+	for _, segment := range parts[:len(parts)-1] {
 		childNode, err := cur.Find(fsys.context(), segment)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound{}) {
-				return nil, "", fs.ErrNotExist
+				return nil, fs.ErrNotExist
 			}
-			return nil, "", fmt.Errorf("find: %w", err)
-		}
-
-		if i == len(parts)-1 {
-			// Last segment of path
-			return childNode, segment, nil
+			return nil, fmt.Errorf("find: %w", err)
 		}
 
 		childDir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(fsys.getter), childNode)
 		if err != nil {
 			if errors.Is(err, uio.ErrNotADir) {
-				return nil, "", fs.ErrInvalid
+				return nil, fs.ErrInvalid
 			}
-			return nil, "", fmt.Errorf("new directory from node: %w", err)
+			return nil, fmt.Errorf("new directory from node: %w", err)
 		}
 
 		cur = childDir
 	}
-	return nil, "", fs.ErrInvalid
+
+	return cur, nil
 }
 
 func dirEntry(ctx context.Context, getter ipld.NodeGetter, dir uio.Directory, name string) (fs.DirEntry, error) {
@@ -272,4 +248,67 @@ func dirEntry(ctx context.Context, getter ipld.NodeGetter, dir uio.Directory, na
 	}
 
 	return nil, fs.ErrInvalid
+}
+
+// OpenFile is the generalized open call. It opens the named file with specified flag (O_RDONLY etc.). If the file does
+// not exist, and the O_CREATE flag is passed, it is created with mode perm (before umask).
+func (fsys *FS) OpenFile(path string, flag int, perm fs.FileMode) (fs.File, error) {
+	if flag != os.O_RDONLY {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  fmt.Errorf("unsupported flag"),
+		}
+	}
+
+	if !fs.ValidPath(path) {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  fs.ErrInvalid,
+		}
+	}
+
+	if path == "." {
+		path = ""
+	}
+	node, nodeName, err := fsys.locateNode(path)
+	if err != nil {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  err,
+		}
+	}
+
+	switch tnode := node.(type) {
+	case *merkledag.ProtoNode:
+		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
+		if err != nil {
+			return nil, &fs.PathError{
+				Op:   "open",
+				Path: path,
+				Err:  err,
+			}
+		}
+
+		switch fsn.Type() {
+		case unixfs.TDirectory, unixfs.THAMTShard:
+			return newDir(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TFile:
+			return newFile(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TRaw:
+			// TODO
+		case unixfs.TSymlink:
+			// TODO
+		}
+	}
+
+	return nil, &fs.PathError{
+		Op:   "open",
+		Path: path,
+		Err:  fs.ErrInvalid,
+	}
 }
