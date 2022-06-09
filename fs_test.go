@@ -294,7 +294,7 @@ func addFileToDir(t *testing.T, parent uio.Directory, ds ipld.DAGService, fpath 
 
 	nd, err := parent.Find(context.TODO(), thisDirName)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ipld.ErrNotFound) {
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ipld.ErrNotFound{}) {
 			// actual error
 			return nil, fmt.Errorf("find %s: %w", thisDirName, err)
 		}

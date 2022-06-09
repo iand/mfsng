@@ -220,7 +220,7 @@ func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
 	for i, segment := range parts {
 		childNode, err := cur.Find(fsys.context(), segment)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound) {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound{}) {
 				return nil, "", fs.ErrNotExist
 			}
 			return nil, "", fmt.Errorf("find: %w", err)
