@@ -15,6 +15,7 @@ type Builder struct {
 	root fsnode
 	node ipld.Node // cached version of the root node
 	ds   ipld.DAGService
+	ctx  context.Context // an embedded context for cancellation and deadline propogation, can be overridden by WithContext method
 }
 
 func NewBuilder(ds ipld.DAGService) *Builder {
@@ -33,12 +34,30 @@ func (b *Builder) WithRootNode(n ipld.Node) *Builder {
 	}
 }
 
+// WithContext returns a Builder using the supplied context
+func (b *Builder) WithContext(ctx context.Context) *Builder {
+	return &Builder{
+		root: b.root,
+		node: b.node,
+		ds:   b.ds,
+		ctx:  ctx,
+	}
+}
+
+func (b *Builder) context() context.Context {
+	if b.ctx == nil {
+		return context.Background()
+	}
+	return b.ctx
+}
+
 // MkdirAll creates a directory named path, along with any necessary parents.
 func (b *Builder) MkdirAll(path string) error {
 	parent := &b.root
+	ctx := b.context()
 
 	for name, remainder, _ := Cut(path, "/"); name != ""; name, remainder, _ = Cut(remainder, "/") {
-		if err := parent.unpack(b.ds); err != nil {
+		if err := parent.unpack(ctx, b.ds); err != nil {
 			return err
 		}
 		parent = parent.findOrAddChild(name)
@@ -47,19 +66,20 @@ func (b *Builder) MkdirAll(path string) error {
 	return nil
 }
 
-// WriteFileNode writes the file represented by node to the path. If the file does not exist, WriteFileNode creates it.
+// WriteFileNode writes the file represented by node to the path. If the path does not exist, WriteFileNode creates it.
 func (b *Builder) WriteFileNode(path string, node ipld.Node) error {
 	parent := &b.root
+	ctx := b.context()
 
 	name, remainder, isdir := Cut(path, "/")
 	for ; isdir; name, remainder, isdir = Cut(remainder, "/") {
-		if err := parent.unpack(b.ds); err != nil {
+		if err := parent.unpack(ctx, b.ds); err != nil {
 			return fmt.Errorf("unpack: %w", err)
 		}
 		parent = parent.findOrAddChild(name)
 	}
 
-	if err := parent.unpack(b.ds); err != nil {
+	if err := parent.unpack(ctx, b.ds); err != nil {
 		return fmt.Errorf("unpack: %w", err)
 	}
 	fnode := &fsnode{name: name, cid: node.Cid()}
@@ -116,7 +136,7 @@ type fsnode struct {
 }
 
 // unpack populates the children of this fsnode using the reified node
-func (p *fsnode) unpack(getter ipld.NodeGetter) error {
+func (p *fsnode) unpack(ctx context.Context, getter ipld.NodeGetter) error {
 	if p.cid == cid.Undef {
 		return nil
 	}
@@ -124,11 +144,11 @@ func (p *fsnode) unpack(getter ipld.NodeGetter) error {
 	var links []*ipld.Link
 	if lg, ok := getter.(ipld.LinkGetter); ok {
 		// ignore errors and fall through to getting the node
-		links, _ = lg.GetLinks(context.TODO(), p.cid)
+		links, _ = lg.GetLinks(ctx, p.cid)
 	}
 
 	if links == nil {
-		nd, err := getter.Get(context.TODO(), p.cid)
+		nd, err := getter.Get(ctx, p.cid)
 		if err != nil {
 			return fmt.Errorf("get node: %w", err)
 		}
