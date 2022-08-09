@@ -190,57 +190,6 @@ func (p *fsnode) findOrAddChild(name string) *fsnode {
 	}
 }
 
-func (p *fsnode) rm(c *fsnode) {
-	if p.child == nil || c == nil {
-		return
-	}
-
-	if p.child == c {
-		p.child = p.child.next
-		return
-	}
-
-	var n *fsnode
-	for n = p.child; n != nil; n = n.next {
-		if n.next == c {
-			n.next = n.next.next
-			return
-		}
-	}
-}
-
-func dump(n *fsnode) {
-	dumpindent(n, 0)
-}
-
-func dumpindent(n *fsnode, indent int) {
-	if n.cid == cid.Undef {
-		fmt.Println(strings.Repeat("  ", indent) + n.name)
-	} else {
-		fmt.Println(strings.Repeat("  ", indent) + n.name + " " + n.cid.String())
-	}
-	if n.child != nil {
-		dumpindent(n.child, indent+1)
-	}
-
-	if n.next != nil {
-		dumpindent(n.next, indent)
-	}
-}
-
-func walkdf(n *fsnode, fn func(n *fsnode) error) error {
-	if n.cid == cid.Undef && n.child != nil {
-		walkdf(n.child, fn)
-	}
-	if err := fn(n); err != nil {
-		return err
-	}
-	if n.next != nil {
-		walkdf(n.next, fn)
-	}
-	return nil
-}
-
 func buildNode(n *fsnode, ds ipld.DAGService) (ipld.Node, error) {
 	if n.cid != cid.Undef {
 		nd, err := ds.Get(context.TODO(), n.cid)

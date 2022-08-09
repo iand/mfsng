@@ -2,8 +2,10 @@ package mfsng
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"path"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -440,4 +442,39 @@ func TestBuilderWithRoot(t *testing.T) {
 			assertFSStructure(t, fsys, expected)
 		})
 	}
+}
+
+//lint:ignore U1000 keep debugging function
+func dump(n *fsnode) {
+	dumpindent(n, 0)
+}
+
+//lint:ignore U1000 keep debugging function
+func dumpindent(n *fsnode, indent int) {
+	if n.cid == cid.Undef {
+		fmt.Println(strings.Repeat("  ", indent) + n.name)
+	} else {
+		fmt.Println(strings.Repeat("  ", indent) + n.name + " " + n.cid.String())
+	}
+	if n.child != nil {
+		dumpindent(n.child, indent+1)
+	}
+
+	if n.next != nil {
+		dumpindent(n.next, indent)
+	}
+}
+
+//lint:ignore U1000 keep debugging function
+func walkdf(n *fsnode, fn func(n *fsnode) error) error {
+	if n.cid == cid.Undef && n.child != nil {
+		walkdf(n.child, fn)
+	}
+	if err := fn(n); err != nil {
+		return err
+	}
+	if n.next != nil {
+		walkdf(n.next, fn)
+	}
+	return nil
 }
