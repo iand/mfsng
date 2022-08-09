@@ -5,22 +5,31 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ipfs/go-cid"
 	ipld "github.com/ipfs/go-ipld-format"
-	// ufs "github.com/ipfs/go-unixfs"
 	uio "github.com/ipfs/go-unixfs/io"
-	// "github.com/ipfs/go-merkledag"
 )
 
+// A Builder builds a unixfs. It is not safe for concurrent use.
 type Builder struct {
 	root fsnode
+	node ipld.Node // cached version of the root node
 	ds   ipld.DAGService
 }
-
-// TODO: create a builder based on an existing Read FS
 
 func NewBuilder(ds ipld.DAGService) *Builder {
 	return &Builder{
 		ds: ds,
+	}
+}
+
+func (b *Builder) WithRootNode(n ipld.Node) *Builder {
+	return &Builder{
+		root: fsnode{
+			cid: n.Cid(),
+		},
+		node: n,
+		ds:   b.ds,
 	}
 }
 
@@ -29,6 +38,9 @@ func (b *Builder) MkdirAll(path string) error {
 	parent := &b.root
 
 	for name, remainder, _ := Cut(path, "/"); name != ""; name, remainder, _ = Cut(remainder, "/") {
+		if err := parent.unpack(b.ds); err != nil {
+			return err
+		}
 		parent = parent.findOrAddChild(name)
 	}
 
@@ -41,10 +53,16 @@ func (b *Builder) WriteFileNode(path string, node ipld.Node) error {
 
 	name, remainder, isdir := Cut(path, "/")
 	for ; isdir; name, remainder, isdir = Cut(remainder, "/") {
+		if err := parent.unpack(b.ds); err != nil {
+			return fmt.Errorf("unpack: %w", err)
+		}
 		parent = parent.findOrAddChild(name)
 	}
 
-	fnode := &fsnode{name: name, node: node}
+	if err := parent.unpack(b.ds); err != nil {
+		return fmt.Errorf("unpack: %w", err)
+	}
+	fnode := &fsnode{name: name, cid: node.Cid()}
 	parent.addChild(fnode)
 
 	return nil
@@ -55,7 +73,8 @@ func (b *Builder) Flush() error {
 	if err != nil {
 		return err
 	}
-	b.root.node = n
+	b.root.cid = n.Cid()
+	b.node = n
 	return nil
 }
 
@@ -65,7 +84,7 @@ func (b *Builder) ReadFS() (*FS, error) {
 		return nil, err
 	}
 
-	return ReadFS(b.root.node, b.ds)
+	return ReadFS(b.node, b.ds)
 }
 
 // Cut slices s around the first instance of sep,
@@ -80,16 +99,66 @@ func Cut(s, sep string) (before, after string, found bool) {
 	return s, "", false
 }
 
+// fsnode is a node in an ephemeral filesystem
 type fsnode struct {
-	name  string
-	node  ipld.Node
+	// name is the name of the node which, in ipfs, is the name that appears in
+	// the link of the parent node
+	name string
+
+	// cid of the node that represents this fsnode. Must be set to cid.Undef when fsnode is mutated.
+	cid cid.Cid
+
+	// child is the first child of the fsnode. Must be nil when cid is defined
 	child *fsnode
-	next  *fsnode
+
+	// child is the next peer of the fsnode
+	next *fsnode
+}
+
+// unpack populates the children of this fsnode using the reified node
+func (p *fsnode) unpack(getter ipld.NodeGetter) error {
+	if p.cid == cid.Undef {
+		return nil
+	}
+
+	var links []*ipld.Link
+	if lg, ok := getter.(ipld.LinkGetter); ok {
+		// ignore errors and fall through to getting the node
+		links, _ = lg.GetLinks(context.TODO(), p.cid)
+	}
+
+	if links == nil {
+		nd, err := getter.Get(context.TODO(), p.cid)
+		if err != nil {
+			return fmt.Errorf("get node: %w", err)
+		}
+		links = nd.Links()
+	}
+
+	var c *fsnode
+	for _, lnk := range links {
+		n := &fsnode{
+			name: lnk.Name,
+			cid:  lnk.Cid,
+		}
+
+		if c == nil {
+			p.child = n
+		} else {
+			c.next = n
+		}
+		c = n
+	}
+
+	p.cid = cid.Undef
+
+	return nil
 }
 
 func (p *fsnode) addChild(c *fsnode) {
 	if p.child == nil {
 		p.child = c
+		p.cid = cid.Undef // mark parent as mutated
 		return
 	}
 
@@ -145,10 +214,10 @@ func dump(n *fsnode) {
 }
 
 func dumpindent(n *fsnode, indent int) {
-	if n.node == nil {
+	if n.cid == cid.Undef {
 		fmt.Println(strings.Repeat("  ", indent) + n.name)
 	} else {
-		fmt.Println(strings.Repeat("  ", indent) + n.name + " " + n.node.Cid().String())
+		fmt.Println(strings.Repeat("  ", indent) + n.name + " " + n.cid.String())
 	}
 	if n.child != nil {
 		dumpindent(n.child, indent+1)
@@ -160,7 +229,7 @@ func dumpindent(n *fsnode, indent int) {
 }
 
 func walkdf(n *fsnode, fn func(n *fsnode) error) error {
-	if n.node == nil && n.child != nil {
+	if n.cid == cid.Undef && n.child != nil {
 		walkdf(n.child, fn)
 	}
 	if err := fn(n); err != nil {
@@ -173,8 +242,12 @@ func walkdf(n *fsnode, fn func(n *fsnode) error) error {
 }
 
 func buildNode(n *fsnode, ds ipld.DAGService) (ipld.Node, error) {
-	if n.node != nil {
-		return n.node, nil
+	if n.cid != cid.Undef {
+		nd, err := ds.Get(context.TODO(), n.cid)
+		if err != nil {
+			return nil, fmt.Errorf("get node: %w", err)
+		}
+		return nd, nil
 	}
 
 	dir := uio.NewDirectory(ds)
@@ -193,9 +266,10 @@ func buildNode(n *fsnode, ds ipld.DAGService) (ipld.Node, error) {
 		return nil, err
 	}
 
-	n.node = nd
-	if err := ds.Add(context.TODO(), n.node); err != nil {
+	n.cid = nd.Cid()
+	n.child = nil // preserve invariant that child must be nil when node is not
+	if err := ds.Add(context.TODO(), nd); err != nil {
 		return nil, fmt.Errorf("add node to dag service: %w", err)
 	}
-	return n.node, err
+	return nd, err
 }

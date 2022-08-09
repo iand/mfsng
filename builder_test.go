@@ -1,11 +1,14 @@
 package mfsng
 
 import (
+	"context"
 	"io/fs"
 	"path"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/ipfs/go-cid"
 	mdtest "github.com/ipfs/go-merkledag/test"
 	utest "github.com/ipfs/go-unixfs/test"
 )
@@ -14,7 +17,6 @@ func TestBuilderWriteFileNode(t *testing.T) {
 	testCases := []struct {
 		files map[string][]byte
 	}{
-
 		{
 			files: map[string][]byte{
 				"hello.txt": []byte("hello1"),
@@ -46,14 +48,14 @@ func TestBuilderWriteFileNode(t *testing.T) {
 			b := NewBuilder(ds)
 			b.root.name = "root"
 
-			expected := map[string][]string{}
+			expected := map[string][]namecid{}
 
 			for pth, content := range tc.files {
 				edir := path.Dir(pth)
 				ename := path.Base(pth)
-				expected[edir] = append(expected[edir], ename)
-
 				nd := utest.GetNode(t, ds, content, utest.UseCidV1)
+				expected[edir] = append(expected[edir], namecid{Name: ename, Cid: nd.Cid()})
+
 				t.Logf("writing file %s", pth)
 				err := b.WriteFileNode(pth, nd)
 				if err != nil {
@@ -71,7 +73,129 @@ func TestBuilderWriteFileNode(t *testing.T) {
 	}
 }
 
-func assertFSStructure(tb testing.TB, fsys *FS, expected map[string][]string) {
+func TestBuilderOverwriteFileNode(t *testing.T) {
+	type version struct {
+		path    string
+		content []byte
+	}
+	testCases := []struct {
+		versions []version
+	}{
+		{
+			versions: []version{
+				{
+					path:    "hello.txt",
+					content: []byte("hello1"),
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			ds := mdtest.Mock()
+			b := NewBuilder(ds)
+			b.root.name = "root"
+
+			expected := map[string][]namecid{}
+
+			for i, v := range tc.versions {
+				edir := path.Dir(v.path)
+				ename := path.Base(v.path)
+				nd := utest.GetNode(t, ds, v.content, utest.UseCidV1)
+
+				if i == len(tc.versions)-1 {
+					// last version
+					expected[edir] = append(expected[edir], namecid{Name: ename, Cid: nd.Cid()})
+				}
+
+				t.Logf("writing file version %d at %s", i, v.path)
+				err := b.WriteFileNode(v.path, nd)
+				if err != nil {
+					t.Fatalf("failed to write file node %q: %v", v.path, err)
+				}
+			}
+
+			fsys, err := b.ReadFS()
+			if err != nil {
+				t.Fatalf("failed to get read fs: %v", err)
+			}
+
+			assertFSStructure(t, fsys, expected)
+		})
+	}
+}
+
+func TestBuilderWriteFileNodeAfterFlush(t *testing.T) {
+	testCases := []struct {
+		files map[string][]byte
+	}{
+		{
+			files: map[string][]byte{
+				"hello.txt": []byte("hello1"),
+			},
+		},
+		{
+			files: map[string][]byte{
+				"foo/hello.txt": []byte("hello1"),
+			},
+		},
+		{
+			files: map[string][]byte{
+				"foo/hello.txt":   []byte("hello1"),
+				"foo/goodbye.txt": []byte("goodbye"),
+			},
+		},
+		{
+			files: map[string][]byte{
+				"foo/hello.txt":   []byte("hello1"),
+				"foo/welcome.txt": []byte("welcome"),
+				"foo/goodbye.txt": []byte("goodbye"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			ds := mdtest.Mock()
+			b := NewBuilder(ds)
+			b.root.name = "root"
+
+			expected := map[string][]namecid{}
+
+			for pth, content := range tc.files {
+				edir := path.Dir(pth)
+				ename := path.Base(pth)
+				nd := utest.GetNode(t, ds, content, utest.UseCidV1)
+				expected[edir] = append(expected[edir], namecid{Name: ename, Cid: nd.Cid()})
+
+				t.Logf("writing file %s", pth)
+				err := b.WriteFileNode(pth, nd)
+				if err != nil {
+					t.Fatalf("failed to write file node %q: %v", pth, err)
+				}
+
+				if err := b.Flush(); err != nil {
+					t.Fatalf("failed to flush builder: %v", err)
+				}
+			}
+
+			fsys, err := b.ReadFS()
+			if err != nil {
+				t.Fatalf("failed to get read fs: %v", err)
+			}
+
+			assertFSStructure(t, fsys, expected)
+		})
+	}
+}
+
+type namecid struct {
+	Name string
+	Cid  cid.Cid
+}
+
+func assertFSStructure(tb testing.TB, fsys *FS, expected map[string][]namecid) {
 	tb.Helper()
 
 	if len(expected) == 0 {
@@ -110,13 +234,16 @@ func assertFSStructure(tb testing.TB, fsys *FS, expected map[string][]string) {
 			continue
 		}
 
-		files := make([]string, len(entries))
-		for i := range files {
-			files[i] = entries[i].Name()
+		files := make([]namecid, 0, len(entries))
+		for i := range entries {
+			if fe, ok := entries[i].(*File); ok {
+				files = append(files, namecid{Name: fe.Name(), Cid: fe.Cid()})
+			}
 		}
 
-		if diff := cmp.Diff(dfiles, files, ignoreSliceOrder); diff != "" {
-			tb.Errorf("Entries() mismatch (-want +got):\n%s", diff)
+		if diff := cmp.Diff(dfiles, files, cmpopts.SortSlices(func(a, b namecid) bool { return a.Name < b.Name }), cmpopts.IgnoreUnexported(cid.Cid{})); diff != "" {
+			logFS(tb, fsys)
+			tb.Errorf("ReadDir(%q) mismatch (-want +got):\n%s", path, diff)
 		}
 	}
 }
@@ -134,7 +261,6 @@ func TestBuilderMkdirAll(t *testing.T) {
 		makes    []string
 		expected []string
 	}{
-
 		{
 			makes: []string{
 				"",
@@ -199,9 +325,111 @@ func TestBuilderMkdirAll(t *testing.T) {
 				}
 			}
 
-			expected := map[string][]string{}
+			expected := map[string][]namecid{}
 			for _, path := range tc.expected {
-				expected[path] = []string{}
+				expected[path] = []namecid{}
+			}
+
+			fsys, err := b.ReadFS()
+			if err != nil {
+				t.Fatalf("failed to get read fs: %v", err)
+			}
+
+			assertFSStructure(t, fsys, expected)
+		})
+	}
+}
+
+func TestBuilderWithRoot(t *testing.T) {
+	testCases := []struct {
+		base  map[string][]byte
+		files map[string][]byte
+	}{
+		{
+			base: map[string][]byte{
+				"afile": []byte("afile content"),
+			},
+			files: map[string][]byte{
+				"hello.txt": []byte("hello1"),
+			},
+		},
+		{
+			base: map[string][]byte{
+				"a/b/c/d/e/f/g/afile": []byte("afile content"),
+			},
+			files: map[string][]byte{
+				"hello.txt": []byte("hello1"),
+			},
+		},
+		{
+			base: map[string][]byte{
+				"foo/afile": []byte("afile content"),
+			},
+			files: map[string][]byte{
+				"foo/hello.txt": []byte("hello1"),
+			},
+		},
+		{
+			base: map[string][]byte{
+				"afile":     []byte("afile content"),
+				"foo/bfile": []byte("bfile content"),
+				"foo/cfile": []byte("cfile content"),
+			},
+			files: map[string][]byte{
+				"foo/hello.txt":   []byte("hello1"),
+				"foo/goodbye.txt": []byte("goodbye"),
+			},
+		},
+		{
+			base: map[string][]byte{
+				"hello.txt": []byte("hello1"),
+			},
+			files: map[string][]byte{
+				"hello.txt": []byte("hello2"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			ds := mdtest.Mock()
+
+			// Get a root node that represents the unixfs described by tc.base
+			basedir := buildUnixFS(t, ds, tc.base)
+			basenode, err := basedir.GetNode()
+			if err != nil {
+				t.Fatalf("failed to get root directory node: %v", err)
+			}
+
+			ds.Add(context.TODO(), basenode)
+			if err != nil {
+				t.Fatalf("failed to add root directory node: %v", err)
+			}
+
+			b := NewBuilder(ds).WithRootNode(basenode)
+
+			combined := map[string][]byte{}
+			for pth, content := range tc.base {
+				combined[pth] = content
+			}
+			for pth, content := range tc.files {
+				combined[pth] = content
+			}
+
+			expected := map[string][]namecid{}
+
+			for pth, content := range combined {
+				edir := path.Dir(pth)
+				ename := path.Base(pth)
+
+				nd := utest.GetNode(t, ds, content, utest.UseCidV1)
+				expected[edir] = append(expected[edir], namecid{Name: ename, Cid: nd.Cid()})
+
+				t.Logf("writing file %s", pth)
+				err := b.WriteFileNode(pth, nd)
+				if err != nil {
+					t.Fatalf("failed to write file node %q: %v", pth, err)
+				}
 			}
 
 			fsys, err := b.ReadFS()

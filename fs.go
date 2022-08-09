@@ -60,7 +60,56 @@ func (fsys *FS) context() context.Context {
 }
 
 func (fsys *FS) Open(path string) (fs.File, error) {
-	return fsys.OpenFile(path, os.O_RDONLY, 0)
+	if !fs.ValidPath(path) {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  fs.ErrInvalid,
+		}
+	}
+
+	if path == "." {
+		path = ""
+	}
+	node, nodeName, err := fsys.locateNode(path)
+	if err != nil {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  err,
+		}
+	}
+
+	switch tnode := node.(type) {
+	case *merkledag.ProtoNode:
+		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
+		if err != nil {
+			return nil, &fs.PathError{
+				Op:   "open",
+				Path: path,
+				Err:  err,
+			}
+		}
+
+		switch fsn.Type() {
+		case unixfs.TDirectory, unixfs.THAMTShard:
+			return newDir(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TFile:
+			return newFile(fsys.context(), nodeName, tnode, fsys.getter)
+
+		case unixfs.TRaw:
+			// TODO
+		case unixfs.TSymlink:
+			// TODO
+		}
+	}
+
+	return nil, &fs.PathError{
+		Op:   "open",
+		Path: path,
+		Err:  fs.ErrInvalid,
+	}
 }
 
 // Sub returns an FS corresponding to the subtree rooted at dir.
@@ -248,67 +297,4 @@ func dirEntry(ctx context.Context, getter ipld.NodeGetter, dir uio.Directory, na
 	}
 
 	return nil, fs.ErrInvalid
-}
-
-// OpenFile is the generalized open call. It opens the named file with specified flag (O_RDONLY etc.). If the file does
-// not exist, and the O_CREATE flag is passed, it is created with mode perm (before umask).
-func (fsys *FS) OpenFile(path string, flag int, perm fs.FileMode) (fs.File, error) {
-	if flag != os.O_RDONLY {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  fmt.Errorf("unsupported flag"),
-		}
-	}
-
-	if !fs.ValidPath(path) {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  fs.ErrInvalid,
-		}
-	}
-
-	if path == "." {
-		path = ""
-	}
-	node, nodeName, err := fsys.locateNode(path)
-	if err != nil {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  err,
-		}
-	}
-
-	switch tnode := node.(type) {
-	case *merkledag.ProtoNode:
-		fsn, err := unixfs.FSNodeFromBytes(tnode.Data())
-		if err != nil {
-			return nil, &fs.PathError{
-				Op:   "open",
-				Path: path,
-				Err:  err,
-			}
-		}
-
-		switch fsn.Type() {
-		case unixfs.TDirectory, unixfs.THAMTShard:
-			return newDir(fsys.context(), nodeName, tnode, fsys.getter)
-
-		case unixfs.TFile:
-			return newFile(fsys.context(), nodeName, tnode, fsys.getter)
-
-		case unixfs.TRaw:
-			// TODO
-		case unixfs.TSymlink:
-			// TODO
-		}
-	}
-
-	return nil, &fs.PathError{
-		Op:   "open",
-		Path: path,
-		Err:  fs.ErrInvalid,
-	}
 }

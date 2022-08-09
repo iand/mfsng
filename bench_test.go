@@ -103,12 +103,12 @@ func TestAddFileTree(t *testing.T) {
 
 	b := NewBuilder(ds)
 	b.root.name = "TestAddFileTree"
-	expected := map[string][]string{}
+	expected := map[string][]namecid{}
 
 	fs.Reset()
 	for fs.Next() {
 		e := fs.Entry()
-		expected[e.path] = append(expected[e.path], e.name)
+		expected[e.path] = append(expected[e.path], namecid{Name: e.name, Cid: e.node.Cid()})
 
 		if err := b.WriteFileNode(e.path+"/"+e.name, e.node); err != nil {
 			t.Fatalf("failed to add child %s/%q: %v", e.path, e.name, err)
