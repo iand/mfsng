@@ -9,11 +9,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ipfs/go-fetcher"
 	ipld "github.com/ipfs/go-ipld-format"
 	"github.com/ipfs/go-merkledag"
 	ipath "github.com/ipfs/go-path"
 	"github.com/ipfs/go-unixfs"
 	uio "github.com/ipfs/go-unixfs/io"
+	ipldp "github.com/ipld/go-ipld-prime"
 )
 
 var (
@@ -21,16 +23,17 @@ var (
 	_ fs.FS        = (*FS)(nil)
 	_ fs.ReadDirFS = (*FS)(nil)
 	_ fs.SubFS     = (*FS)(nil)
+	_ ipldp.Node   = nil
 )
 
 type FS struct {
 	udir   uio.Directory
-	getter ipld.NodeGetter
+	getter fetcher.Fetcher
 	ctx    context.Context // an embedded context for cancellation and deadline propogation, can be overridden by WithContext method
 }
 
 // ReadFS returns a read-only filesystem. It expects the supplied node to be the root of a UnixFS merkledag.
-func ReadFS(node ipld.Node, getter ipld.NodeGetter) (*FS, error) {
+func ReadFS(node ipld.Node, getter fetcher.Fetcher) (*FS, error) {
 	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(getter), node)
 	if err != nil {
 		return nil, fmt.Errorf("new directory from node: %w", err)
