@@ -19,6 +19,9 @@ import (
 	ufs "github.com/ipfs/go-unixfs"
 	uio "github.com/ipfs/go-unixfs/io"
 	utest "github.com/ipfs/go-unixfs/test"
+	dagpb "github.com/ipld/go-codec-dagpb"
+	prime "github.com/ipld/go-ipld-prime"
+	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
 )
 
 func TestFS(t *testing.T) {
@@ -231,6 +234,42 @@ func TestGlob(t *testing.T) {
 	}
 }
 
+// func TestOpenFileWithLinkSystem(t *testing.T) {
+// 	expectedData := []byte("afile content")
+
+// 	ds := mdtest.Mock()
+// 	fsys := buildFS(t, ds, map[string][]byte{
+// 		"a/b/c/d/e/f/g/afile": expectedData,
+// 	})
+
+// 	ls := newLinkSystem(t, ds)
+// 	fsys = fsys.WithLinkSystem(ls)
+
+// 	f, err := fsys.Open("a/b/c/d/e/f/g/afile")
+// 	if err != nil {
+// 		t.Fatalf("failed to open file: %v", err)
+// 	}
+// 	defer f.Close()
+
+// 	info, err := f.Stat()
+// 	if err != nil {
+// 		t.Fatalf("failed to stat file: %v", err)
+// 	}
+
+// 	if info.IsDir() {
+// 		t.Errorf("got IsDir=true, wanted false")
+// 	}
+
+// 	data, err := io.ReadAll(f)
+// 	if err != nil {
+// 		t.Fatalf("failed to read file: %v", err)
+// 	}
+
+// 	if !bytes.Equal(data, expectedData) {
+// 		t.Errorf("got data %v, wanted %v", data, expectedData)
+// 	}
+// }
+
 var ignoreSliceOrder = cmpopts.SortSlices(func(a, b string) bool { return a < b })
 
 func buildFS(t *testing.T, ds ipld.DAGService, files map[string][]byte) *FS {
@@ -241,8 +280,20 @@ func buildFS(t *testing.T, ds ipld.DAGService, files map[string][]byte) *FS {
 	if err != nil {
 		t.Fatalf("failed to get root directory node: %v", err)
 	}
+	if err := ds.Add(context.TODO(), dirnode); err != nil {
+		t.Fatalf("add empty dir to dag service: %v", err)
+	}
 
-	fsys, err := ReadFS(dirnode, ds)
+	lsys := newLinkSystem(t, ds)
+
+	link := cidlink.Link{Cid: dirnode.Cid()}
+
+	node, err := lsys.Load(prime.LinkContext{}, link, dagpb.Type.PBNode)
+	if err != nil {
+		t.Fatalf("failed to load node: %v", err)
+	}
+
+	fsys, err := ReadFS(node, lsys)
 	if err != nil {
 		t.Fatalf("failed to create fs: %v", err)
 	}
@@ -329,4 +380,27 @@ func addFileToDir(t *testing.T, parent uio.Directory, ds ipld.DAGService, fpath 
 	}
 
 	return parent, nil
+}
+
+func newLinkSystem(t *testing.T, ds ipld.DAGService) *prime.LinkSystem {
+	ls := cidlink.DefaultLinkSystem()
+	o := &dagServiceOpener{ds: ds}
+	ls.StorageReadOpener = o.OpenRead
+	return &ls
+}
+
+type dagServiceOpener struct {
+	ds ipld.DAGService
+}
+
+func (d *dagServiceOpener) OpenRead(lnkCtx prime.LinkContext, lnk prime.Link) (io.Reader, error) {
+	cl, ok := lnk.(cidlink.Link)
+	if !ok {
+		return nil, fmt.Errorf("incompatible link type: %T", lnk)
+	}
+	block, err := d.ds.Get(lnkCtx.Ctx, cl.Cid)
+	if err != nil {
+		return nil, fmt.Errorf("dag service get: %w", err)
+	}
+	return bytes.NewReader(block.RawData()), nil
 }

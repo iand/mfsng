@@ -7,18 +7,17 @@ import (
 	"io/fs"
 	"sync"
 
-	ipld "github.com/ipfs/go-ipld-format"
-	"github.com/ipfs/go-merkledag"
-	uio "github.com/ipfs/go-unixfs/io"
+	// ipld "github.com/ipfs/go-ipld-format"
+	prime "github.com/ipld/go-ipld-prime"
 )
 
 var _ fs.ReadDirFile = (*Dir)(nil)
 
 type Dir struct {
-	udir   uio.Directory
-	getter ipld.NodeGetter
-	ctx    context.Context // an embedded context for cancellation and deadline propogation
-	info   FileInfo
+	node prime.Node
+	lsys *prime.LinkSystem
+	ctx  context.Context // an embedded context for cancellation and deadline propogation
+	info FileInfo
 
 	namesOnce sync.Once
 	names     []string // names is written once by namesOnce and read-only thereafter
@@ -27,27 +26,20 @@ type Dir struct {
 	offset int        // number of entries read by prior calls to ReadDir
 }
 
-func newDir(ctx context.Context, name string, node ipld.Node, getter ipld.NodeGetter) (*Dir, error) {
-	udir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(getter), node)
-	if err != nil {
-		return nil, fmt.Errorf("directory from node: %w", err)
-	}
-	return newDirFromUnixFS(ctx, name, node, getter, udir)
-}
-
-func newDirFromUnixFS(ctx context.Context, name string, node ipld.Node, getter ipld.NodeGetter, udir uio.Directory) (*Dir, error) {
-	size, err := node.Size()
-	if err != nil {
-		return nil, err
-	}
+func newDir(ctx context.Context, name string, node prime.Node, lsys *prime.LinkSystem) (*Dir, error) {
+	// TODO: size
+	// size, err := node.Size()
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	return &Dir{
-		udir:   udir,
-		getter: getter,
-		ctx:    ctx,
+		node: node,
+		lsys: lsys,
+		ctx:  ctx,
 		info: FileInfo{
-			name:     name,
-			size:     int64(size),
+			name: name,
+			// size:     int64(size),
 			filemode: fs.ModeDir,
 			node:     node,
 		},
@@ -89,11 +81,7 @@ func (d *Dir) ReadDir(limit int) ([]fs.DirEntry, error) {
 	// Read the names once
 	var err error
 	d.namesOnce.Do(func() {
-		var names []string
-		listErr := d.udir.ForEachLink(d.ctx, func(l *ipld.Link) error {
-			names = append(names, l.Name)
-			return nil
-		})
+		names, listErr := listNames(d.node)
 		if listErr != nil {
 			err = fmt.Errorf("list names: %w", listErr)
 			return
@@ -121,7 +109,7 @@ func (d *Dir) ReadDir(limit int) ([]fs.DirEntry, error) {
 	for i := range entries {
 		name := d.names[offset+i]
 
-		entry, err := dirEntry(d.ctx, d.getter, d.udir, name)
+		entry, err := dirEntry(d.ctx, d.node, d.lsys, name)
 		if err != nil {
 			d.mu.Lock()
 			d.offset += i
@@ -141,4 +129,27 @@ func (d *Dir) ReadDir(limit int) ([]fs.DirEntry, error) {
 	d.offset += n
 	d.mu.Unlock()
 	return entries, nil
+}
+
+var _ fs.ReadDirFile = (*DirPrime)(nil)
+
+type DirPrime struct {
+	info FileInfo
+}
+
+func (d *DirPrime) ReadDir(limit int) ([]fs.DirEntry, error) {
+	panic("ReadDir: not implemented")
+}
+
+func (d *DirPrime) Close() error {
+	panic("Close: not implemented")
+}
+
+func (d *DirPrime) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.info.name, Err: fs.ErrInvalid}
+}
+
+// Stat returns a FileInfo describing the directory.
+func (d *DirPrime) Stat() (fs.FileInfo, error) {
+	return &d.info, nil
 }
