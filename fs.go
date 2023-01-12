@@ -206,8 +206,7 @@ func (fsys *FS) ReadDir(path string) ([]fs.DirEntry, error) {
 
 func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
 	path = strings.Trim(path, "/")
-	parts := ipath.SplitList(path)
-	if len(parts) == 1 && parts[0] == "" {
+	if path == "" {
 		node, err := fsys.udir.GetNode()
 		if err != nil {
 			return nil, "", fmt.Errorf("get root node: %w", err)
@@ -215,33 +214,59 @@ func (fsys *FS) locateNode(path string) (ipld.Node, string, error) {
 		return node, "", nil
 	}
 
+	parent, err := fsys.locateParentDir(path)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var name string
+	i := strings.LastIndex(path, "/")
+	if i == -1 {
+		name = path
+	} else {
+		name = path[i+1:]
+	}
+
+	child, err := parent.Find(fsys.context(), name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound{}) {
+			return nil, "", fs.ErrNotExist
+		}
+		return nil, "", fmt.Errorf("find: %w", err)
+	}
+	return child, name, nil
+}
+
+func (fsys *FS) locateParentDir(path string) (uio.Directory, error) {
+	path = strings.Trim(path, "/")
+	if strings.LastIndex(path, "/") == -1 {
+		return fsys.udir, nil
+	}
+	parts := ipath.SplitList(path)
+
 	var cur uio.Directory
 	cur = fsys.udir
-	for i, segment := range parts {
+	for _, segment := range parts[:len(parts)-1] {
 		childNode, err := cur.Find(fsys.context(), segment)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, ipld.ErrNotFound{}) {
-				return nil, "", fs.ErrNotExist
+				return nil, fs.ErrNotExist
 			}
-			return nil, "", fmt.Errorf("find: %w", err)
-		}
-
-		if i == len(parts)-1 {
-			// Last segment of path
-			return childNode, segment, nil
+			return nil, fmt.Errorf("find: %w", err)
 		}
 
 		childDir, err := uio.NewDirectoryFromNode(merkledag.NewReadOnlyDagService(fsys.getter), childNode)
 		if err != nil {
 			if errors.Is(err, uio.ErrNotADir) {
-				return nil, "", fs.ErrInvalid
+				return nil, fs.ErrInvalid
 			}
-			return nil, "", fmt.Errorf("new directory from node: %w", err)
+			return nil, fmt.Errorf("new directory from node: %w", err)
 		}
 
 		cur = childDir
 	}
-	return nil, "", fs.ErrInvalid
+
+	return cur, nil
 }
 
 func dirEntry(ctx context.Context, getter ipld.NodeGetter, dir uio.Directory, name string) (fs.DirEntry, error) {
