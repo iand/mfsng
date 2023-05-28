@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ipfs/boxo/ipld/merkledag"
+	"github.com/ipfs/boxo/ipld/unixfs"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
+	ipath "github.com/ipfs/boxo/path"
 	ipld "github.com/ipfs/go-ipld-format"
-	"github.com/ipfs/go-merkledag"
-	ipath "github.com/ipfs/go-path"
-	"github.com/ipfs/go-unixfs"
-	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var (

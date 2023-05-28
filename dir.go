@@ -7,9 +7,9 @@ import (
 	"io/fs"
 	"sync"
 
+	"github.com/ipfs/boxo/ipld/merkledag"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
 	ipld "github.com/ipfs/go-ipld-format"
-	"github.com/ipfs/go-merkledag"
-	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var _ fs.ReadDirFile = (*Dir)(nil)
