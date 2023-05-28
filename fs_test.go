@@ -14,11 +14,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	mdtest "github.com/ipfs/boxo/ipld/merkledag/test"
+	ufs "github.com/ipfs/boxo/ipld/unixfs"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
+	utest "github.com/ipfs/boxo/ipld/unixfs/test"
 	ipld "github.com/ipfs/go-ipld-format"
-	mdtest "github.com/ipfs/go-merkledag/test"
-	ufs "github.com/ipfs/go-unixfs"
-	uio "github.com/ipfs/go-unixfs/io"
-	utest "github.com/ipfs/go-unixfs/test"
 )
 
 func TestFS(t *testing.T) {

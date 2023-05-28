@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
 	"github.com/ipfs/go-cid"
 	ipld "github.com/ipfs/go-ipld-format"
-	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var (
